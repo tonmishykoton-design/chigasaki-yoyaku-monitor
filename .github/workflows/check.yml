@@ -2,10 +2,9 @@ name: 茅ヶ崎市施設予約 空き状況チェック
 
 on:
   schedule:
-    # UTC基準。日本時間 9:00 と 23:00 に実行
-    - cron: '0 0 * * *'
-    - cron: '0 14 * * *'
-  workflow_dispatch: {}  # 手動実行もできるようにしておく
+    - cron: 0 0 * * *
+    - cron: 0 14 * * *
+  workflow_dispatch: {}
 
 jobs:
   check:
@@ -18,7 +17,7 @@ jobs:
       - name: Pythonをセットアップ
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: 3.11
 
       - name: 依存パッケージをインストール
         run: |
