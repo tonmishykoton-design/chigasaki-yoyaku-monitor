@@ -12,6 +12,7 @@ import os
 import re
 import smtplib
 import ssl
+import time
 from email.mime.text import MIMEText
 from datetime import datetime
 
@@ -26,32 +27,54 @@ from config import (
 )
 
 
-def get_active_frame(page: Page) -> Frame:
-    """フレーム構成のページから、実際に本文が入っているフレームを探す。"""
-    candidates = [f for f in page.frames if f != page.main_frame]
-    for frame in candidates:
-        try:
-            content = frame.content()
-        except Exception:
-            continue
-        if "施設" in content or "空き状況" in content or "茅ヶ崎市公共施設予約サービス" in content:
-            return frame
-    return page.main_frame
+def get_active_frame(page: Page, timeout_ms: int = 15000) -> Frame:
+    """フレーム構成のページから、実際に本文が入っているフレームを探す。
+
+    このサイトはフレームセット形式で、外枠はすぐ表示されるが中身の
+    読み込みは少し遅れることがあるため、見つかるまで一定時間リトライする。
+    """
+    deadline = time.time() + timeout_ms / 1000
+    last_frame = page.main_frame
+    while time.time() < deadline:
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                content = frame.content()
+            except Exception:
+                continue
+            if content and ("施設" in content or "空き状況" in content or "茅ヶ崎市公共施設予約サービス" in content):
+                return frame
+            if content:
+                last_frame = frame
+        page.wait_for_timeout(300)
+    return last_frame
 
 
-def click_link(page: Page, text: str, timeout: int = 15000) -> Frame:
+def click_link(page: Page, text: str, timeout: int = 20000) -> Frame:
     """現在アクティブなフレーム内のリンクをテキストでクリックし、
     遷移後のアクティブフレームを返す。"""
     frame = get_active_frame(page)
     locator = frame.locator(f"a:has-text('{text}')")
-    locator.first.click(timeout=timeout)
-    page.wait_for_load_state("networkidle")
+    try:
+        locator.first.click(timeout=timeout)
+    except Exception:
+        # デバッグ用: 失敗時にどんなフレームがあったかログに残す
+        print(f"[デバッグ] '{text}' のクリックに失敗しました。現在のフレーム一覧:")
+        for f in page.frames:
+            try:
+                print(f"  - url={f.url} content_len={len(f.content())}")
+            except Exception as e:
+                print(f"  - url={f.url} content取得失敗: {e}")
+        raise
+    frame.wait_for_load_state("networkidle")
     return get_active_frame(page)
 
 
 def navigate_to_result_table(page: Page, building: str) -> Frame:
     """トップページから、指定した建物の「開始時間指定(空き状況一覧)」画面まで進める。"""
     page.goto(BASE_URL, wait_until="networkidle")
+    page.wait_for_timeout(1000)  # フレーム内コンテンツの読み込みを待つ
 
     frame = click_link(page, "空き状況の確認")
     frame = click_link(page, "屋内（体育施設）")
