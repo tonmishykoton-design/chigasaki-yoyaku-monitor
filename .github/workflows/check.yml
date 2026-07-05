@@ -1,1 +1,33 @@
+name: 茅ヶ崎市施設予約 空き状況チェック
 
+on:
+  schedule:
+    # UTC基準。日本時間 9:00 と 23:00 に実行
+    - cron: '0 0 * * *'
+    - cron: '0 14 * * *'
+  workflow_dispatch: {}  # 手動実行もできるようにしておく
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: Pythonをセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 依存パッケージをインストール
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: 空き状況を確認
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+        run: python check_availability.py
