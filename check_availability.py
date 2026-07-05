@@ -164,6 +164,7 @@ def send_mail(subject: str, body: str):
 
 def main():
     all_found = []
+    all_errors = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -174,10 +175,19 @@ def main():
                 found = check_building(page, building, keywords)
                 all_found.extend(found)
             except Exception as e:
-                all_found.append(f"[エラー] {building} の確認中に問題が発生しました: {e}")
+                # サイトが夜間(23:00〜9:00)閉鎖されている時間帯に実行されると
+                # ここでタイムアウトする。これは異常ではないので、
+                # 「空きあり」メールとは混同せず、ログにのみ残す。
+                all_errors.append(f"[エラー] {building} の確認中に問題が発生しました: {e}")
 
         browser.close()
 
+    # エラーはログに出すだけ(メールでは通知しない)。
+    # サイトの夜間閉鎖時間帯にあたっただけの可能性が高いため。
+    for err in all_errors:
+        print(err)
+
+    # 本当に空きが見つかった場合のみメール送信する
     if all_found:
         body = "以下の日程で空きが見つかりました。\n\n" + "\n".join(all_found)
         body += f"\n\n確認日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{BASE_URL}"
