@@ -67,14 +67,17 @@ def click_link(page: Page, text: str, timeout: int = 20000) -> Frame:
             except Exception as e:
                 print(f"  - url={f.url} content取得失敗: {e}")
         raise
-    frame.wait_for_load_state("networkidle")
+    try:
+        frame.wait_for_load_state("domcontentloaded", timeout=10000)
+    except Exception:
+        pass  # フレーム自体の遷移完了イベントが拾えない場合もあるため無視
     return get_active_frame(page)
 
 
 def navigate_to_result_table(page: Page, building: str) -> Frame:
     """トップページから、指定した建物の「開始時間指定(空き状況一覧)」画面まで進める。"""
-    page.goto(BASE_URL, wait_until="networkidle")
-    page.wait_for_timeout(1000)  # フレーム内コンテンツの読み込みを待つ
+    page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(1500)  # フレーム内コンテンツの読み込みを待つ
 
     frame = click_link(page, "空き状況の確認")
     frame = click_link(page, "屋内（体育施設）")
@@ -130,7 +133,11 @@ def advance_to_next_week(frame: Frame) -> bool:
     if locator.count() == 0:
         return False
     locator.first.click()
-    frame.page.wait_for_load_state("networkidle")
+    try:
+        frame.wait_for_load_state("domcontentloaded", timeout=10000)
+    except Exception:
+        pass
+    frame.page.wait_for_timeout(500)
     return True
 
 
@@ -139,7 +146,11 @@ def advance_to_next_day(frame: Frame) -> bool:
     if locator.count() == 0:
         return False
     locator.first.click()
-    frame.page.wait_for_load_state("networkidle")
+    try:
+        frame.wait_for_load_state("domcontentloaded", timeout=10000)
+    except Exception:
+        pass
+    frame.page.wait_for_timeout(500)
     return True
 
 
