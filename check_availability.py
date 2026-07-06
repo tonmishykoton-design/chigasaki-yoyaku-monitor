@@ -52,7 +52,8 @@ def dump_frames_for_debug(page: Page, text: str):
     print(f"[デバッグ] '{text}' を含むフレームが見つかりませんでした。現在のフレーム一覧:")
     for f in page.frames:
         try:
-            print(f"  - url={f.url} content_len={len(f.content())}")
+            content = safe_content(f, retries=2, delay_ms=300)
+            print(f"  - url={f.url} content_len={len(content)}")
         except Exception as e:
             print(f"  - url={f.url} content取得失敗: {e}")
 
@@ -88,10 +89,23 @@ def navigate_to_result_table(page: Page, building: str) -> Frame:
     return frame
 
 
+def safe_content(frame: Frame, retries: int = 6, delay_ms: int = 400) -> str:
+    """frame.content() はページ遷移の一瞬とタイミングが重なると
+    失敗することがあるため、少し待って再試行する。"""
+    last_err = None
+    for _ in range(retries):
+        try:
+            return frame.content()
+        except Exception as e:
+            last_err = e
+            frame.page.wait_for_timeout(delay_ms)
+    raise last_err
+
+
 def parse_table_for_targets(frame: Frame, facility_keywords):
     """開始時間指定ページの表を読み取り、対象施設の対象時間帯が
     空き(○)かどうかを判定する。"""
-    html = frame.content()
+    html = safe_content(frame)
 
     date_match = re.search(r"(令和\d+年\d+月\d+日)", html)
     date_str = date_match.group(1) if date_match else "(日付不明)"
@@ -160,7 +174,7 @@ def check_building(page: Page, building: str, facility_keywords):
 
     # 日曜日になるまで「次の日」を押す(最大7回で必ず到達する)
     for _ in range(7):
-        html = frame.content()
+        html = safe_content(frame)
         if "(日)" in html or "（日）" in html:
             break
         if not advance_to_next_day(frame):
