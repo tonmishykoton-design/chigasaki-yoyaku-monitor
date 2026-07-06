@@ -75,9 +75,24 @@ def click_link(page: Page, text: str, timeout: int = 20000) -> Frame:
     return frame
 
 
+def goto_with_retry(page: Page, url: str, attempts: int = 3):
+    """トップページを開く処理。サイトが一時的に重い場合があるため、
+    失敗したら少し待って再挑戦する。"""
+    last_err = None
+    for i in range(attempts):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            return
+        except Exception as e:
+            last_err = e
+            print(f"[デバッグ] ページを開くのに失敗(試行{i + 1}/{attempts}): {e}")
+            page.wait_for_timeout(3000)
+    raise last_err
+
+
 def navigate_to_result_table(page: Page, building: str) -> Frame:
     """トップページから、指定した建物の「開始時間指定(空き状況一覧)」画面まで進める。"""
-    page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
+    goto_with_retry(page, BASE_URL)
     page.wait_for_timeout(1500)  # フレーム内コンテンツの読み込みを待つ
 
     click_link(page, "空き状況の確認")
@@ -168,30 +183,48 @@ def advance_to_next_day(frame: Frame) -> bool:
     return True
 
 
-def check_building(page: Page, building: str, facility_keywords):
-    frame = navigate_to_result_table(page, building)
-    found = []
+def check_building(page: Page, building: str, facility_keywords, attempts: int = 3):
+    """指定した建物の空き状況を確認する。
 
-    # 日曜日になるまで「次の日」を押す(最大7回で必ず到達する)
-    for _ in range(7):
-        html = safe_content(frame)
-        if "(日)" in html or "（日）" in html:
-            break
-        if not advance_to_next_day(frame):
-            break
+    古いサイト特有の一過性の遅延・タイミングのズレで失敗することがあるため、
+    失敗した場合は最初からやり直す(最大 attempts 回)。
+    これにより、軽微な不具合であれば人が再実行しなくても自動で回復する。
+    """
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            frame = navigate_to_result_table(page, building)
+            found = []
 
-    for _ in range(MAX_WEEKS_AHEAD):
-        results, date_str, is_sunday = parse_table_for_targets(frame, facility_keywords)
-        if is_sunday:
-            for facility_name, available in results:
-                if available:
-                    found.append(
-                        f"{date_str}（日） {facility_name} {TARGET_TIME_COLUMN}〜 空きあり"
-                    )
-        if not advance_to_next_week(frame):
-            break  # サイト側の検索可能期間の終端に到達
+            # 日曜日になるまで「次の日」を押す(最大7回で必ず到達する)
+            for _ in range(7):
+                html = safe_content(frame)
+                if "(日)" in html or "（日）" in html:
+                    break
+                if not advance_to_next_day(frame):
+                    break
 
-    return found
+            for _ in range(MAX_WEEKS_AHEAD):
+                results, date_str, is_sunday = parse_table_for_targets(frame, facility_keywords)
+                if is_sunday:
+                    for facility_name, available in results:
+                        if available:
+                            found.append(
+                                f"{date_str}（日） {facility_name} {TARGET_TIME_COLUMN}〜 空きあり"
+                            )
+                if not advance_to_next_week(frame):
+                    break  # サイト側の検索可能期間の終端に到達
+
+            return found  # 成功したらここで終了
+
+        except Exception as e:
+            last_err = e
+            print(f"[デバッグ] {building} の確認 試行{attempt}/{attempts} 失敗: {e}")
+            if attempt < attempts:
+                page.wait_for_timeout(4000)  # 少し間を空けてから最初からやり直す
+
+    # 全ての試行が失敗した場合のみ、呼び出し元にエラーを伝える
+    raise last_err
 
 
 def send_mail(subject: str, body: str):
