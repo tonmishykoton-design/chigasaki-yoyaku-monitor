@@ -104,14 +104,16 @@ def navigate_to_result_table(page: Page, building: str) -> Frame:
     return frame
 
 
-def safe_content(frame: Frame, retries: int = 8, delay_ms: int = 600) -> str:
+def safe_content(frame: Frame, retries: int = 20, delay_ms: int = 800) -> str:
     """frame.content() はページ遷移の一瞬とタイミングが重なると
     失敗することがあるため、少し待って再試行する。
 
     このサイトのフレーム構成では、content() が「遷移中」だと誤判定し
     続けることがあるため、失敗時は evaluate() 経由でのHTML取得も試みる。
+    合計で最大16秒ほど粘り強く待つ(結果画面の描画が遅い場合への対応)。
     """
     last_err = None
+    last_eval_err = None
     for _ in range(retries):
         try:
             return frame.content()
@@ -121,9 +123,10 @@ def safe_content(frame: Frame, retries: int = 8, delay_ms: int = 600) -> str:
                 html = frame.evaluate("() => document.documentElement.outerHTML")
                 if html:
                     return html
-            except Exception:
-                pass
+            except Exception as e2:
+                last_eval_err = e2
             frame.page.wait_for_timeout(delay_ms)
+    print(f"[デバッグ] safe_content 全リトライ失敗。content()エラー: {last_err} / evaluate()エラー: {last_eval_err}")
     raise last_err
 
 
