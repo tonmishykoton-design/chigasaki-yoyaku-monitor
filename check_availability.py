@@ -5,7 +5,14 @@
 
 前提:
 - ログイン不要な「空き状況の確認」機能のみを使用
-- GitHub Actions から1日2回(朝9時・夜11時)実行される想定
+- GitHub Actions から1日2回実行される想定
+
+設計上の注意(重要):
+このサイトはリンクをクリックすると、フレームの中身だけでなく
+フレームそのものが作り直される(古いFrameオブジェクトが「detached」に
+なる)ことがある。そのため、一度取得したFrameオブジェクトを使い回さず、
+「次に何かする直前に、毎回そのつどページ全体から目的のフレームを
+探し直す」という設計にしている。
 """
 
 import os
@@ -27,52 +34,46 @@ from config import (
 )
 
 
-def find_frame_with_link(page: Page, text: str, timeout_ms: int = 15000):
-    """クリックしたいリンクのテキストが実際に存在するフレームを、
-    全フレームの中から探す。見つかるまで一定時間リトライする。
-
-    (このサイトは複数のフレームに分かれており、共通メニュー部分にも
-    サイト名など紛らわしい文字列が含まれるため、「らしきフレームを一つ
-    推測する」方式ではなく、目的のリンクそのものを直接探す方式にしている)
-    """
+def find_frame_with_selector(page: Page, selector: str, timeout_ms: int = 20000) -> Frame:
+    """指定したセレクタ(リンクのテキストなど)にマッチする要素を持つフレームを、
+    ページの全フレームの中から探す。見つかるまでリトライする。
+    毎回ページの最新のフレーム一覧から探すため、古いフレームが
+    detached(消滅)していても影響を受けない。"""
     deadline = time.time() + timeout_ms / 1000
     while time.time() < deadline:
         for frame in page.frames:
             try:
-                locator = frame.locator(f"a:has-text('{text}')")
-                if locator.count() > 0:
-                    return frame, locator
+                if frame.locator(selector).count() > 0:
+                    return frame
             except Exception:
                 continue
         page.wait_for_timeout(300)
-    return None, None
+    return None
 
 
-def dump_frames_for_debug(page: Page, text: str):
-    print(f"[デバッグ] '{text}' を含むフレームが見つかりませんでした。現在のフレーム一覧:")
+def dump_frames_for_debug(page: Page, label: str):
+    print(f"[デバッグ] '{label}' が見つかりませんでした。現在のフレーム一覧:")
     for f in page.frames:
         try:
-            content = safe_content(f, retries=2, delay_ms=300)
-            print(f"  - url={f.url} content_len={len(content)}")
+            print(f"  - url={f.url}")
         except Exception as e:
-            print(f"  - url={f.url} content取得失敗: {e}")
+            print(f"  - url取得失敗: {e}")
 
 
-def click_link(page: Page, text: str, timeout: int = 20000) -> Frame:
-    """リンクのテキストが存在するフレームを直接探してクリックし、
-    そのフレームを返す。"""
-    frame, locator = find_frame_with_link(page, text, timeout_ms=timeout)
+def click_text_link(page: Page, text: str, timeout_ms: int = 20000):
+    """リンクのテキストが存在するフレームを毎回探し直してクリックする。"""
+    selector = f"a:has-text('{text}')"
+    frame = find_frame_with_selector(page, selector, timeout_ms=timeout_ms)
     if frame is None:
         dump_frames_for_debug(page, text)
         raise RuntimeError(f"リンク '{text}' を含むフレームが見つかりませんでした")
 
-    locator.first.click(timeout=timeout)
+    frame.locator(selector).first.click(timeout=timeout_ms)
     try:
         frame.wait_for_load_state("domcontentloaded", timeout=10000)
     except Exception:
         pass
-    page.wait_for_timeout(500)
-    return frame
+    page.wait_for_timeout(700)
 
 
 def goto_with_retry(page: Page, url: str, attempts: int = 3):
@@ -90,65 +91,69 @@ def goto_with_retry(page: Page, url: str, attempts: int = 3):
     raise last_err
 
 
-def navigate_to_result_table(page: Page, building: str) -> Frame:
-    """トップページから、指定した建物の「開始時間指定(空き状況一覧)」画面まで進める。"""
+def navigate_to_result_table(page: Page, building: str):
+    """トップページから、指定した建物の「開始時間指定(空き状況一覧)」画面まで進める。
+    (Frameオブジェクトは返さない。以降は毎回そのつど探し直す)"""
     goto_with_retry(page, BASE_URL)
     page.wait_for_timeout(1500)  # フレーム内コンテンツの読み込みを待つ
 
-    click_link(page, "空き状況の確認")
-    click_link(page, "屋内（体育施設）")
-    click_link(page, building)
+    click_text_link(page, "空き状況の確認")
+    click_text_link(page, "屋内（体育施設）")
+    click_text_link(page, building)
     # 第一条件選択画面: 目的選択タブがデフォルトで開いている想定。
     # 「屋内その他」を選べば建物内の全施設が一覧表示される。
-    frame = click_link(page, "屋内その他")
-    return frame
+    click_text_link(page, "屋内その他")
 
 
-def safe_content(frame: Frame, retries: int = 20, delay_ms: int = 800) -> str:
+def safe_content(frame: Frame, retries: int = 15, delay_ms: int = 500) -> str:
     """frame.content() はページ遷移の一瞬とタイミングが重なると
-    失敗することがあるため、少し待って再試行する。
-
-    このサイトのフレーム構成では、content() が「遷移中」だと誤判定し
-    続けることがあるため、失敗時は evaluate() 経由でのHTML取得も試みる。
-    合計で最大16秒ほど粘り強く待つ(結果画面の描画が遅い場合への対応)。
-    """
+    失敗することがあるため、少し待って再試行する。"""
     last_err = None
-    last_eval_err = None
     for _ in range(retries):
         try:
             return frame.content()
         except Exception as e:
             last_err = e
-            try:
-                html = frame.evaluate("() => document.documentElement.outerHTML")
-                if html:
-                    return html
-            except Exception as e2:
-                last_eval_err = e2
-            frame.page.wait_for_timeout(delay_ms)
-    print(f"[デバッグ] safe_content 全リトライ失敗。content()エラー: {last_err} / evaluate()エラー: {last_eval_err}")
+            time.sleep(delay_ms / 1000)
     raise last_err
 
 
-def parse_table_for_targets(frame: Frame, facility_keywords):
-    """開始時間指定ページの表を読み取り、対象施設の対象時間帯が
-    空き(○)かどうかを判定する。"""
-    html = safe_content(frame)
+def get_result_frame(page: Page, timeout_ms: int = 20000) -> Frame:
+    """空き状況の一覧表(または「次の日」「一週間後」リンク)を含む
+    フレームを、その都度ページ全体から探す。"""
+    selector = "a:has-text('次の日'), a:has-text('一週間後'), table"
+    frame = find_frame_with_selector(page, selector, timeout_ms=timeout_ms)
+    if frame is None:
+        dump_frames_for_debug(page, "結果テーブル")
+        raise RuntimeError("結果テーブルを含むフレームが見つかりませんでした")
+    return frame
 
+
+def parse_table_for_targets(html: str, facility_keywords):
+    """開始時間指定ページのHTML文字列を読み取り、対象施設の対象時間帯が
+    空き(○)かどうかを判定する。(HTML文字列に対する軽量パースのみ行い、
+    Playwrightのライブオブジェクトには依存しない)"""
     date_match = re.search(r"(令和\d+年\d+月\d+日)", html)
     date_str = date_match.group(1) if date_match else "(日付不明)"
     is_sunday = "(日)" in html or "（日）" in html
 
     results = []
-    rows = frame.locator("table tr")
-    row_count = rows.count()
-    if row_count == 0:
+
+    # <tr> ... </tr> を1行ずつ抜き出す(改行含む場合があるためDOTALL)
+    row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+    cell_pattern = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
+    tag_strip = re.compile(r"<[^>]+>")
+
+    def clean(cell_html: str) -> str:
+        return tag_strip.sub("", cell_html).strip()
+
+    rows = row_pattern.findall(html)
+    if not rows:
         return results, date_str, is_sunday
 
-    header_cells = rows.nth(0).locator("th, td")
+    header_cells = [clean(c) for c in cell_pattern.findall(rows[0])]
     col_index = None
-    for i in range(header_cells.count()):
-        text = header_cells.nth(i).inner_text().strip()
+    for i, text in enumerate(header_cells):
         if TARGET_TIME_COLUMN in text:
             col_index = i
             break
@@ -156,43 +161,32 @@ def parse_table_for_targets(frame: Frame, facility_keywords):
     if col_index is None:
         return results, date_str, is_sunday
 
-    for r in range(1, row_count):
-        row = rows.nth(r)
-        cells = row.locator("td")
-        if cells.count() <= col_index:
+    for row_html in rows[1:]:
+        cells = [clean(c) for c in cell_pattern.findall(row_html)]
+        if len(cells) <= col_index:
             continue
-        facility_name = cells.nth(0).inner_text().strip()
+        facility_name = cells[0]
         if not any(kw in facility_name for kw in facility_keywords):
             continue
-        mark = cells.nth(col_index).inner_text().strip()
+        mark = cells[col_index]
         results.append((facility_name, mark == AVAILABLE_MARK))
 
     return results, date_str, is_sunday
 
 
-def advance_to_next_week(frame: Frame) -> bool:
-    locator = frame.locator("a:has-text('一週間後')")
-    if locator.count() == 0:
+def advance(page: Page, link_text: str) -> bool:
+    """「次の日」または「一週間後」のリンクを、そのつどフレームを
+    探し直してクリックする。リンクが無ければFalseを返す。"""
+    selector = f"a:has-text('{link_text}')"
+    frame = find_frame_with_selector(page, selector, timeout_ms=5000)
+    if frame is None:
         return False
-    locator.first.click()
+    frame.locator(selector).first.click()
     try:
         frame.wait_for_load_state("domcontentloaded", timeout=10000)
     except Exception:
         pass
-    frame.page.wait_for_timeout(500)
-    return True
-
-
-def advance_to_next_day(frame: Frame) -> bool:
-    locator = frame.locator("a:has-text('次の日')")
-    if locator.count() == 0:
-        return False
-    locator.first.click()
-    try:
-        frame.wait_for_load_state("domcontentloaded", timeout=10000)
-    except Exception:
-        pass
-    frame.page.wait_for_timeout(500)
+    page.wait_for_timeout(700)
     return True
 
 
@@ -201,31 +195,33 @@ def check_building(page: Page, building: str, facility_keywords, attempts: int =
 
     古いサイト特有の一過性の遅延・タイミングのズレで失敗することがあるため、
     失敗した場合は最初からやり直す(最大 attempts 回)。
-    これにより、軽微な不具合であれば人が再実行しなくても自動で回復する。
     """
     last_err = None
     for attempt in range(1, attempts + 1):
         try:
-            frame = navigate_to_result_table(page, building)
-            found = []
+            navigate_to_result_table(page, building)
 
             # 日曜日になるまで「次の日」を押す(最大7回で必ず到達する)
             for _ in range(7):
+                frame = get_result_frame(page)
                 html = safe_content(frame)
                 if "(日)" in html or "（日）" in html:
                     break
-                if not advance_to_next_day(frame):
+                if not advance(page, "次の日"):
                     break
 
+            found = []
             for _ in range(MAX_WEEKS_AHEAD):
-                results, date_str, is_sunday = parse_table_for_targets(frame, facility_keywords)
+                frame = get_result_frame(page)
+                html = safe_content(frame)
+                results, date_str, is_sunday = parse_table_for_targets(html, facility_keywords)
                 if is_sunday:
                     for facility_name, available in results:
                         if available:
                             found.append(
                                 f"{date_str}（日） {facility_name} {TARGET_TIME_COLUMN}〜 空きあり"
                             )
-                if not advance_to_next_week(frame):
+                if not advance(page, "一週間後"):
                     break  # サイト側の検索可能期間の終端に到達
 
             return found  # 成功したらここで終了
@@ -236,7 +232,6 @@ def check_building(page: Page, building: str, facility_keywords, attempts: int =
             if attempt < attempts:
                 page.wait_for_timeout(4000)  # 少し間を空けてから最初からやり直す
 
-    # 全ての試行が失敗した場合のみ、呼び出し元にエラーを伝える
     raise last_err
 
 
@@ -269,15 +264,13 @@ def main():
                 found = check_building(page, building, keywords)
                 all_found.extend(found)
             except Exception as e:
-                # サイトが夜間(23:00〜9:00)閉鎖されている時間帯に実行されると
-                # ここでタイムアウトする。これは異常ではないので、
-                # 「空きあり」メールとは混同せず、ログにのみ残す。
+                # サイトが夜間閉鎖されている時間帯や、一時的な不調で
+                # 発生することがあるため、これは異常終了とはせず
+                # ログにのみ残す(「空きあり」メールとは混同しない)。
                 all_errors.append(f"[エラー] {building} の確認中に問題が発生しました: {e}")
 
         browser.close()
 
-    # エラーはログに出すだけ(メールでは通知しない)。
-    # サイトの夜間閉鎖時間帯にあたっただけの可能性が高いため。
     for err in all_errors:
         print(err)
 
