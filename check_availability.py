@@ -104,15 +104,25 @@ def navigate_to_result_table(page: Page, building: str) -> Frame:
     return frame
 
 
-def safe_content(frame: Frame, retries: int = 6, delay_ms: int = 400) -> str:
+def safe_content(frame: Frame, retries: int = 8, delay_ms: int = 600) -> str:
     """frame.content() はページ遷移の一瞬とタイミングが重なると
-    失敗することがあるため、少し待って再試行する。"""
+    失敗することがあるため、少し待って再試行する。
+
+    このサイトのフレーム構成では、content() が「遷移中」だと誤判定し
+    続けることがあるため、失敗時は evaluate() 経由でのHTML取得も試みる。
+    """
     last_err = None
     for _ in range(retries):
         try:
             return frame.content()
         except Exception as e:
             last_err = e
+            try:
+                html = frame.evaluate("() => document.documentElement.outerHTML")
+                if html:
+                    return html
+            except Exception:
+                pass
             frame.page.wait_for_timeout(delay_ms)
     raise last_err
 
