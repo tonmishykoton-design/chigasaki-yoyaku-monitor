@@ -56,6 +56,12 @@ def dump_frames_for_debug(page: Page, label: str):
     for f in page.frames:
         try:
             print(f"  - url={f.url}")
+            try:
+                text = f.locator("body").inner_text(timeout=3000)
+                preview = text.strip().replace("\n", " / ")[:300]
+                print(f"    本文プレビュー: {preview}")
+            except Exception as e2:
+                print(f"    本文取得失敗: {e2}")
         except Exception as e:
             print(f"  - url取得失敗: {e}")
 
