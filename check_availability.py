@@ -132,14 +132,19 @@ def get_result_frame(page: Page, timeout_ms: int = 20000) -> Frame:
 def parse_table_for_targets(html: str, facility_keywords):
     """開始時間指定ページのHTML文字列を読み取り、対象施設の対象時間帯が
     空き(○)かどうかを判定する。(HTML文字列に対する軽量パースのみ行い、
-    Playwrightのライブオブジェクトには依存しない)"""
+    Playwrightのライブオブジェクトには依存しない)
+
+    ページ内には施設一覧の表以外にもメニューなど別の<table>/<tr>が
+    存在することがあるため、「09:00や18:00といった時間帯の見出しを
+    実際に含む表」を明示的に探してから解析する。
+    """
     date_match = re.search(r"(令和\d+年\d+月\d+日)", html)
     date_str = date_match.group(1) if date_match else "(日付不明)"
     is_sunday = "(日)" in html or "（日）" in html
 
     results = []
 
-    # <tr> ... </tr> を1行ずつ抜き出す(改行含む場合があるためDOTALL)
+    table_pattern = re.compile(r"<table[^>]*>(.*?)</table>", re.IGNORECASE | re.DOTALL)
     row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
     cell_pattern = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
     tag_strip = re.compile(r"<[^>]+>")
@@ -147,26 +152,39 @@ def parse_table_for_targets(html: str, facility_keywords):
     def clean(cell_html: str) -> str:
         return tag_strip.sub("", cell_html).strip()
 
-    rows = row_pattern.findall(html)
-    if not rows:
-        return results, date_str, is_sunday
+    def matches_facility(facility_name: str) -> bool:
+        # 例: 「柔剣道場」は「剣道場」という文字列を含むため、
+        # 「剣道場」単体を狙っている設定だと誤って一致してしまう。
+        # 「柔剣道場」自体を対象にしていない限り、これは除外する。
+        if "柔剣道場" in facility_name and "柔剣道場" not in facility_keywords:
+            return False
+        return any(kw in facility_name for kw in facility_keywords)
 
-    header_cells = [clean(c) for c in cell_pattern.findall(rows[0])]
+    target_rows = None
     col_index = None
-    for i, text in enumerate(header_cells):
-        if TARGET_TIME_COLUMN in text:
-            col_index = i
+
+    for table_html in table_pattern.findall(html):
+        rows_in_table = row_pattern.findall(table_html)
+        if not rows_in_table:
+            continue
+        header_cells = [clean(c) for c in cell_pattern.findall(rows_in_table[0])]
+        for i, text in enumerate(header_cells):
+            if TARGET_TIME_COLUMN in text:
+                col_index = i
+                target_rows = rows_in_table
+                break
+        if target_rows is not None:
             break
 
-    if col_index is None:
+    if target_rows is None or col_index is None:
         return results, date_str, is_sunday
 
-    for row_html in rows[1:]:
+    for row_html in target_rows[1:]:
         cells = [clean(c) for c in cell_pattern.findall(row_html)]
         if len(cells) <= col_index:
             continue
         facility_name = cells[0]
-        if not any(kw in facility_name for kw in facility_keywords):
+        if not matches_facility(facility_name):
             continue
         mark = cells[col_index]
         results.append((facility_name, mark == AVAILABLE_MARK))
@@ -216,6 +234,7 @@ def check_building(page: Page, building: str, facility_keywords, attempts: int =
                 html = safe_content(frame)
                 results, date_str, is_sunday = parse_table_for_targets(html, facility_keywords)
                 if is_sunday:
+                    print(f"[デバッグ] {building} {date_str}(日) 判定結果: {results}")
                     for facility_name, available in results:
                         if available:
                             found.append(
