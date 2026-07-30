@@ -119,12 +119,15 @@ def safe_content(frame: Frame, retries: int = 15, delay_ms: int = 500) -> str:
 
 
 def get_result_frame(page: Page, timeout_ms: int = 20000) -> Frame:
-    """空き状況の一覧表(または「次の日」「一週間後」リンク)を含む
-    フレームを、その都度ページ全体から探す。"""
-    selector = "a:has-text('次の日'), a:has-text('一週間後'), table"
+    """空き状況の一覧表を含むフレームを、その都度ページ全体から探す。
+
+    「table」タグの有無だけを条件にすると、メニューなど無関係な
+    小さな表にも反応してしまうことがあるため、結果画面に必ず表示される
+    「◯◯年◯◯月◯◯日の空き状況」という特徴的な文言を目印にする。"""
+    selector = "text=の空き状況"
     frame = find_frame_with_selector(page, selector, timeout_ms=timeout_ms)
     if frame is None:
-        dump_frames_for_debug(page, "結果テーブル")
+        dump_frames_for_debug(page, "結果テーブル(の空き状況)")
         raise RuntimeError("結果テーブルを含むフレームが見つかりませんでした")
     return frame
 
@@ -220,12 +223,15 @@ def check_building(page: Page, building: str, facility_keywords, attempts: int =
             navigate_to_result_table(page, building)
 
             # 日曜日になるまで「次の日」を押す(最大7回で必ず到達する)
-            for _ in range(7):
+            for day_try in range(7):
                 frame = get_result_frame(page)
                 html = safe_content(frame)
+                date_match = re.search(r"(令和\d+年\d+月\d+日[（(][^）)]+[）)])", html)
+                print(f"[デバッグ] {building} 日付確認{day_try + 1}/7: {date_match.group(1) if date_match else '(日付取得失敗)'}")
                 if "(日)" in html or "（日）" in html:
                     break
                 if not advance(page, "次の日"):
+                    print(f"[デバッグ] {building} 「次の日」リンクが見つかりませんでした")
                     break
 
             found = []
