@@ -49,12 +49,27 @@ def goto_with_retry(page: Page, url: str, attempts: int = 3):
     raise last_err
 
 
-def click_by_text(page: Page, text: str, exact: bool = True, timeout: int = 20000):
-    """画面上のテキストを目印に要素をクリックする
-    (リンクかボタンかを問わず、そのテキストを持つ要素を直接探す)。"""
-    locator = page.get_by_text(text, exact=exact)
-    locator.first.click(timeout=timeout)
-    page.wait_for_timeout(700)
+def click_by_text(page: Page, text: str, exact: bool = True, timeout_ms: int = 20000):
+    """画面上のテキストを目印に要素をクリックする。
+
+    同じテキストを持つ要素が複数存在する(レスポンシブ対応で、非表示の
+    メニューにも同じリンクが重複して存在する、など)ことがあるため、
+    実際に画面に表示されている要素だけを選んでクリックする。"""
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        locator = page.get_by_text(text, exact=exact)
+        count = locator.count()
+        for i in range(count):
+            candidate = locator.nth(i)
+            try:
+                if candidate.is_visible():
+                    candidate.click(timeout=3000)
+                    page.wait_for_timeout(700)
+                    return
+            except Exception:
+                continue
+        page.wait_for_timeout(300)
+    raise RuntimeError(f"'{text}' という表示されている要素が見つかりませんでした")
 
 
 def safe_content(page: Page, retries: int = 10, delay_ms: int = 500) -> str:
