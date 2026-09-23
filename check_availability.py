@@ -102,88 +102,59 @@ def navigate_to_facility_period(page: Page, building: str, room_name: str):
         raise RuntimeError("期間の空き状況の結果画面に到達できませんでした")
 
 
+def _target_range_str() -> str:
+    """TARGET_HOURSから、サイトが内部で使っている '12001500' のような
+    時間範囲文字列(開始時刻+00+終了時刻+00)を組み立てる。"""
+    start_hour = int(TARGET_HOURS[0])
+    end_hour = int(TARGET_HOURS[-1]) + 1
+    return f"{start_hour:02d}00{end_hour:02d}00"
+
+
+# 空きがある(クリックして予約できる)マスにだけ付いている onmousedown 属性から、
+# そのマスが対象としている時間範囲('12001500' のような8桁の文字列)を取り出す。
+# 予約済み(×)のマスにはこの属性自体が存在しないため、これが見つかること自体が
+# 「その時間範囲は予約受付中の空きマスとして表示されている」ことを意味する。
+CHANGE_STATUS_PATTERN = re.compile(
+    r"changeCheckStatus\(\s*'[^']*'\s*,\s*'[^']*'\s*,\s*\d+\s*,\s*'(\d{8})'"
+)
+
+
 def parse_period_table(html: str):
     """「期間の空き状況」画面のHTMLを解析し、日曜日かつ対象時間帯
-    (TARGET_HOURSの列すべて)が○になっている日付を抽出する。
-
-    この画面は1週間ごとに見出し行(「施設」+ 時刻)が繰り返される作りに
-    なっている。また、同じ状態が続く時間帯は colspan で1つのマスに
-    まとめて表示されることがあるため、単純に「何番目のセルか」では
-    正しい時刻位置を特定できない。そのため colspan を考慮して、
-    各セルが実際にどの時刻の列をカバーしているかを計算する。
+    (TARGET_HOURSに対応する時間範囲)が予約受付中の空きになっている
+    日付を抽出する。
 
     戻り値: (空きありと判定した日付のリスト, 日曜日として認識した全行の診断情報)
+    診断情報は [(日付表記, その行で見つかった空き時間範囲のリスト), ...] の形。
     """
+    target_range = _target_range_str()
+
     row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
-    cell_full_pattern = re.compile(r"<(td|th)([^>]*)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
-    colspan_pattern = re.compile(r'colspan\s*=\s*"?(\d+)"?', re.IGNORECASE)
+    first_cell_pattern = re.compile(r"<td[^>]*>(.*?)</td>", re.IGNORECASE | re.DOTALL)
     tag_strip = re.compile(r"<[^>]+>")
 
     def clean(cell_html: str) -> str:
         return tag_strip.sub("", cell_html).strip()
 
-    def parse_cells(row_html):
-        """行の中の各セルを (テキスト, colspan) のリストで返す。"""
-        cells = []
-        for _, attrs, inner in cell_full_pattern.findall(row_html):
-            m = colspan_pattern.search(attrs)
-            span = int(m.group(1)) if m else 1
-            cells.append((clean(inner), span))
-        return cells
-
-    hour_col_index = {}  # 例: {"12": 4, "13": 5, "14": 6}
     found_dates = []
     sunday_debug = []
-    header_seen_count = 0
-    raw_debug = {"header": None, "first_sunday_row": None, "first_sunday_row_html": None}
 
     for row_html in row_pattern.findall(html):
-        cells = parse_cells(row_html)
-        if not cells:
+        first_match = first_cell_pattern.search(row_html)
+        if not first_match:
             continue
-
-        first_text = cells[0][0]
-
-        if first_text == "施設":
-            # 見出し行: 各時刻(8,9,10...)が絶対列位置の何番目かを記録する
-            header_seen_count += 1
-            if raw_debug["header"] is None:
-                raw_debug["header"] = cells
-            hour_col_index = {}
-            col_cursor = 0
-            for text, span in cells[1:]:
-                if text in TARGET_HOURS and text not in hour_col_index:
-                    hour_col_index[text] = col_cursor
-                col_cursor += span
-            continue
-
-        if not hour_col_index:
-            continue
+        first_text = clean(first_match.group(1))
 
         if "（日）" not in first_text and "(日)" not in first_text:
-            continue
+            continue  # 日曜日以外の行はスキップ
 
-        if raw_debug["first_sunday_row"] is None:
-            raw_debug["first_sunday_row"] = cells
-            raw_debug["first_sunday_row_html"] = row_html[:1500]
+        available_ranges = CHANGE_STATUS_PATTERN.findall(row_html)
+        sunday_debug.append((first_text, available_ranges))
 
-        # 日付行: colspanを考慮して、各絶対列位置の値を組み立てる
-        value_by_col = {}
-        col_cursor = 0
-        for text, span in cells[1:]:
-            for c in range(col_cursor, col_cursor + span):
-                value_by_col[c] = text
-            col_cursor += span
-
-        marks = [value_by_col.get(hour_col_index.get(h)) for h in TARGET_HOURS]
-        sunday_debug.append((first_text, marks))
-        if all(m == AVAILABLE_MARK for m in marks):
+        if target_range in available_ranges:
             found_dates.append(first_text)
 
-    if header_seen_count == 0:
-        sunday_debug.append(("(見出し行「施設」が1つも見つかりませんでした)", []))
-
-    return found_dates, sunday_debug, raw_debug
+    return found_dates, sunday_debug
 
 
 def check_facility(page: Page, building: str, room_name: str, attempts: int = 3):
@@ -193,11 +164,8 @@ def check_facility(page: Page, building: str, room_name: str, attempts: int = 3)
         try:
             navigate_to_facility_period(page, building, room_name)
             html = safe_content(page)
-            dates, sunday_debug, raw_debug = parse_period_table(html)
-            print(f"[デバッグ] {building}/{room_name} 見出し行の生セル(テキスト,colspan): {raw_debug['header']}")
-            print(f"[デバッグ] {building}/{room_name} 最初の日曜行の生セル(テキスト,colspan): {raw_debug['first_sunday_row']}")
-            print(f"[デバッグ] {building}/{room_name} 最初の日曜行の生HTML: {raw_debug['first_sunday_row_html']}")
-            print(f"[デバッグ] {building}/{room_name} 日曜日の生データ(対象={TARGET_HOURS}): {sunday_debug}")
+            dates, sunday_debug = parse_period_table(html)
+            print(f"[デバッグ] {building}/{room_name} 日曜日ごとの空き時間範囲: {sunday_debug}")
             print(f"[デバッグ] {building}/{room_name} 判定結果(空き日): {dates}")
             time_label = f"{TARGET_HOURS[0]}:00〜{int(TARGET_HOURS[-1]) + 1}:00"
             return [
