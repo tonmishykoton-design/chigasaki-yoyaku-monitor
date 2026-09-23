@@ -135,7 +135,7 @@ def parse_period_table(html: str):
     found_dates = []
     sunday_debug = []
     header_seen_count = 0
-    raw_debug = {"header": None, "first_sunday_row": None}
+    raw_debug = {"header": None, "first_sunday_row": None, "first_sunday_row_html": None}
 
     for row_html in row_pattern.findall(html):
         cells = parse_cells(row_html)
@@ -165,6 +165,7 @@ def parse_period_table(html: str):
 
         if raw_debug["first_sunday_row"] is None:
             raw_debug["first_sunday_row"] = cells
+            raw_debug["first_sunday_row_html"] = row_html[:1500]
 
         # 日付行: colspanを考慮して、各絶対列位置の値を組み立てる
         value_by_col = {}
@@ -195,6 +196,7 @@ def check_facility(page: Page, building: str, room_name: str, attempts: int = 3)
             dates, sunday_debug, raw_debug = parse_period_table(html)
             print(f"[デバッグ] {building}/{room_name} 見出し行の生セル(テキスト,colspan): {raw_debug['header']}")
             print(f"[デバッグ] {building}/{room_name} 最初の日曜行の生セル(テキスト,colspan): {raw_debug['first_sunday_row']}")
+            print(f"[デバッグ] {building}/{room_name} 最初の日曜行の生HTML: {raw_debug['first_sunday_row_html']}")
             print(f"[デバッグ] {building}/{room_name} 日曜日の生データ(対象={TARGET_HOURS}): {sunday_debug}")
             print(f"[デバッグ] {building}/{room_name} 判定結果(空き日): {dates}")
             time_label = f"{TARGET_HOURS[0]}:00〜{int(TARGET_HOURS[-1]) + 1}:00"
