@@ -107,56 +107,71 @@ def parse_period_table(html: str):
     (TARGET_HOURSの列すべて)が○になっている日付を抽出する。
 
     この画面は1週間ごとに見出し行(「施設」+ 時刻)が繰り返される作りに
-    なっているため、見出し行が出てくるたびに列番号を数え直す。
+    なっている。また、同じ状態が続く時間帯は colspan で1つのマスに
+    まとめて表示されることがあるため、単純に「何番目のセルか」では
+    正しい時刻位置を特定できない。そのため colspan を考慮して、
+    各セルが実際にどの時刻の列をカバーしているかを計算する。
 
     戻り値: (空きありと判定した日付のリスト, 日曜日として認識した全行の診断情報)
-    診断情報は [(日付表記, 対象時刻の実際のマーク値のリスト), ...] の形。
     """
     row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
-    cell_pattern = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
+    cell_full_pattern = re.compile(r"<(td|th)([^>]*)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+    colspan_pattern = re.compile(r'colspan\s*=\s*"?(\d+)"?', re.IGNORECASE)
     tag_strip = re.compile(r"<[^>]+>")
 
     def clean(cell_html: str) -> str:
         return tag_strip.sub("", cell_html).strip()
 
-    col_index = {}
+    def parse_cells(row_html):
+        """行の中の各セルを (テキスト, colspan) のリストで返す。"""
+        cells = []
+        for _, attrs, inner in cell_full_pattern.findall(row_html):
+            m = colspan_pattern.search(attrs)
+            span = int(m.group(1)) if m else 1
+            cells.append((clean(inner), span))
+        return cells
+
+    hour_col_index = {}  # 例: {"12": 4, "13": 5, "14": 6}
     found_dates = []
     sunday_debug = []
     header_seen_count = 0
 
     for row_html in row_pattern.findall(html):
-        cells = [clean(c) for c in cell_pattern.findall(row_html)]
+        cells = parse_cells(row_html)
         if not cells:
             continue
 
-        first = cells[0]
+        first_text = cells[0][0]
 
-        if first == "施設":
+        if first_text == "施設":
+            # 見出し行: 各時刻(8,9,10...)が絶対列位置の何番目かを記録する
             header_seen_count += 1
-            col_index = {}
-            for i, text in enumerate(cells):
-                if text in TARGET_HOURS:
-                    col_index[text] = i
+            hour_col_index = {}
+            col_cursor = 0
+            for text, span in cells[1:]:
+                if text in TARGET_HOURS and text not in hour_col_index:
+                    hour_col_index[text] = col_cursor
+                col_cursor += span
             continue
 
-        if not col_index:
+        if not hour_col_index:
             continue
 
-        if "（日）" not in first and "(日)" not in first:
+        if "（日）" not in first_text and "(日)" not in first_text:
             continue
 
-        indices = [col_index.get(h) for h in TARGET_HOURS]
-        if any(idx is None for idx in indices):
-            sunday_debug.append((first, "列番号が特定できず"))
-            continue
-        if max(indices) >= len(cells):
-            sunday_debug.append((first, f"セル数不足(cells={len(cells)})"))
-            continue
+        # 日付行: colspanを考慮して、各絶対列位置の値を組み立てる
+        value_by_col = {}
+        col_cursor = 0
+        for text, span in cells[1:]:
+            for c in range(col_cursor, col_cursor + span):
+                value_by_col[c] = text
+            col_cursor += span
 
-        marks = [cells[idx] for idx in indices]
-        sunday_debug.append((first, marks))
+        marks = [value_by_col.get(hour_col_index.get(h)) for h in TARGET_HOURS]
+        sunday_debug.append((first_text, marks))
         if all(m == AVAILABLE_MARK for m in marks):
-            found_dates.append(first)
+            found_dates.append(first_text)
 
     if header_seen_count == 0:
         sunday_debug.append(("(見出し行「施設」が1つも見つかりませんでした)", []))
