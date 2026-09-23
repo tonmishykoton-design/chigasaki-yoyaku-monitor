@@ -135,6 +135,7 @@ def parse_period_table(html: str):
     found_dates = []
     sunday_debug = []
     header_seen_count = 0
+    raw_debug = {"header": None, "first_sunday_row": None}
 
     for row_html in row_pattern.findall(html):
         cells = parse_cells(row_html)
@@ -146,6 +147,8 @@ def parse_period_table(html: str):
         if first_text == "施設":
             # 見出し行: 各時刻(8,9,10...)が絶対列位置の何番目かを記録する
             header_seen_count += 1
+            if raw_debug["header"] is None:
+                raw_debug["header"] = cells
             hour_col_index = {}
             col_cursor = 0
             for text, span in cells[1:]:
@@ -159,6 +162,9 @@ def parse_period_table(html: str):
 
         if "（日）" not in first_text and "(日)" not in first_text:
             continue
+
+        if raw_debug["first_sunday_row"] is None:
+            raw_debug["first_sunday_row"] = cells
 
         # 日付行: colspanを考慮して、各絶対列位置の値を組み立てる
         value_by_col = {}
@@ -176,7 +182,7 @@ def parse_period_table(html: str):
     if header_seen_count == 0:
         sunday_debug.append(("(見出し行「施設」が1つも見つかりませんでした)", []))
 
-    return found_dates, sunday_debug
+    return found_dates, sunday_debug, raw_debug
 
 
 def check_facility(page: Page, building: str, room_name: str, attempts: int = 3):
@@ -186,7 +192,9 @@ def check_facility(page: Page, building: str, room_name: str, attempts: int = 3)
         try:
             navigate_to_facility_period(page, building, room_name)
             html = safe_content(page)
-            dates, sunday_debug = parse_period_table(html)
+            dates, sunday_debug, raw_debug = parse_period_table(html)
+            print(f"[デバッグ] {building}/{room_name} 見出し行の生セル(テキスト,colspan): {raw_debug['header']}")
+            print(f"[デバッグ] {building}/{room_name} 最初の日曜行の生セル(テキスト,colspan): {raw_debug['first_sunday_row']}")
             print(f"[デバッグ] {building}/{room_name} 日曜日の生データ(対象={TARGET_HOURS}): {sunday_debug}")
             print(f"[デバッグ] {building}/{room_name} 判定結果(空き日): {dates}")
             time_label = f"{TARGET_HOURS[0]}:00〜{int(TARGET_HOURS[-1]) + 1}:00"
