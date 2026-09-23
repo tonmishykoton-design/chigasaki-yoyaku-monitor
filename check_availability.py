@@ -107,7 +107,11 @@ def parse_period_table(html: str):
     (TARGET_HOURSの列すべて)が○になっている日付を抽出する。
 
     この画面は1週間ごとに見出し行(「施設」+ 時刻)が繰り返される作りに
-    なっているため、見出し行が出てくるたびに列番号を数え直す。"""
+    なっているため、見出し行が出てくるたびに列番号を数え直す。
+
+    戻り値: (空きありと判定した日付のリスト, 日曜日として認識した全行の診断情報)
+    診断情報は [(日付表記, 対象時刻の実際のマーク値のリスト), ...] の形。
+    """
     row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
     cell_pattern = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
     tag_strip = re.compile(r"<[^>]+>")
@@ -117,6 +121,8 @@ def parse_period_table(html: str):
 
     col_index = {}
     found_dates = []
+    sunday_debug = []
+    header_seen_count = 0
 
     for row_html in row_pattern.findall(html):
         cells = [clean(c) for c in cell_pattern.findall(row_html)]
@@ -126,7 +132,7 @@ def parse_period_table(html: str):
         first = cells[0]
 
         if first == "施設":
-            # 見出し行: 対象時刻(18・19・20)が何列目にあるかを記録し直す
+            header_seen_count += 1
             col_index = {}
             for i, text in enumerate(cells):
                 if text in TARGET_HOURS:
@@ -134,22 +140,28 @@ def parse_period_table(html: str):
             continue
 
         if not col_index:
-            continue  # まだ見出し行に出会っていない(通常は起きない)
+            continue
 
         if "（日）" not in first and "(日)" not in first:
-            continue  # 日曜日以外はスキップ
+            continue
 
         indices = [col_index.get(h) for h in TARGET_HOURS]
         if any(idx is None for idx in indices):
+            sunday_debug.append((first, "列番号が特定できず"))
             continue
         if max(indices) >= len(cells):
-            continue  # 休館などで列数が足りない行はスキップ(空きなし扱い)
+            sunday_debug.append((first, f"セル数不足(cells={len(cells)})"))
+            continue
 
         marks = [cells[idx] for idx in indices]
+        sunday_debug.append((first, marks))
         if all(m == AVAILABLE_MARK for m in marks):
             found_dates.append(first)
 
-    return found_dates
+    if header_seen_count == 0:
+        sunday_debug.append(("(見出し行「施設」が1つも見つかりませんでした)", []))
+
+    return found_dates, sunday_debug
 
 
 def check_facility(page: Page, building: str, room_name: str, attempts: int = 3):
@@ -159,10 +171,12 @@ def check_facility(page: Page, building: str, room_name: str, attempts: int = 3)
         try:
             navigate_to_facility_period(page, building, room_name)
             html = safe_content(page)
-            dates = parse_period_table(html)
+            dates, sunday_debug = parse_period_table(html)
+            print(f"[デバッグ] {building}/{room_name} 日曜日の生データ(対象={TARGET_HOURS}): {sunday_debug}")
             print(f"[デバッグ] {building}/{room_name} 判定結果(空き日): {dates}")
+            time_label = f"{TARGET_HOURS[0]}:00〜{int(TARGET_HOURS[-1]) + 1}:00"
             return [
-                f"{date_str} {building} {room_name} 18:00〜21:00 空きあり"
+                f"{date_str} {building} {room_name} {time_label} 空きあり"
                 for date_str in dates
             ]
         except Exception as e:
