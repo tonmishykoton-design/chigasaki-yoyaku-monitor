@@ -23,6 +23,7 @@ import ssl
 import time
 from email.mime.text import MIMEText
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from playwright.sync_api import sync_playwright, Page
 
@@ -223,7 +224,8 @@ def main():
     # 本当に空きが見つかった場合のみメール送信する(エラーだけの時は送らない)
     if all_found:
         body = "以下の日程で空きが見つかりました。\n\n" + "\n".join(all_found)
-        body += f"\n\n確認日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{BASE_URL}"
+        now_jst = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M")
+        body += f"\n\n確認日時: {now_jst} (JST)\n{BASE_URL}"
         send_mail("【茅ヶ崎市施設予約】空き通知", body)
         print("空きあり。メール送信しました。")
     else:
