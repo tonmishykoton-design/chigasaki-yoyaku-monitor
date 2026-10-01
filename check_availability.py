@@ -1,19 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-茅ヶ崎市公共施設予約システム(新システム / P-kashikan)の空き状況を確認し、
-対象施設・対象曜日・対象時間帯に空きがあればメール通知するスクリプト。
+茅ヶ崎市公共施設予約システム(P-kashikan)の空き状況を確認し、
+対象曜日・対象時間帯に空きがあればメール通知するスクリプト。
+
 
 前提:
 - ログイン不要な「空き状況の確認」→「期間の空き状況」機能のみを使用
 - GitHub Actions から1日2回実行される想定
-
-画面遷移:
-トップページ → 「空き状況の確認」→ タブ「期間の空き状況」
- → 施設一覧から建物(総合体育館/市体育館)をクリック
- → 室場一覧から対象施設名をクリック
- → 約40日分の空き状況が1画面で表示される(このサイトは新しいシステムで、
-   以前のような複数フレームには分かれていない普通の1ページ構成のため、
-   旧バージョンで必要だった「フレームの探し直し」処理は不要)
 """
 
 import os
@@ -30,7 +23,7 @@ from playwright.sync_api import sync_playwright, Page
 from config import (
     BASE_URL,
     TARGET_BUILDINGS,
-    TARGET_HOURS,
+    TARGET_CONDITIONS,
     AVAILABLE_MARK,
 )
 
@@ -96,40 +89,35 @@ def navigate_to_facility_period(page: Page, building: str, room_name: str):
     click_by_text(page, building, exact=True)
     click_by_text(page, room_name, exact=True)
 
-    # 結果テーブルの読み込みが終わるまで少し待ち、簡単に内容を確認する
     page.wait_for_timeout(1200)
     html = safe_content(page)
     if "施設詳細" not in html and "の空き状況" not in html:
         raise RuntimeError("期間の空き状況の結果画面に到達できませんでした")
 
 
-def _target_range_str() -> str:
-    """TARGET_HOURSから、サイトが内部で使っている '12001500' のような
-    時間範囲文字列(開始時刻+00+終了時刻+00)を組み立てる。"""
-    start_hour = int(TARGET_HOURS[0])
-    end_hour = int(TARGET_HOURS[-1]) + 1
+def _range_str(hours):
+    """['9','10','11'] のような開始時刻のリストから、サイトが内部で
+    使っている '09001200' のような時間範囲文字列を組み立てる。"""
+    start_hour = int(hours[0])
+    end_hour = int(hours[-1]) + 1
     return f"{start_hour:02d}00{end_hour:02d}00"
 
 
 # 空きがある(クリックして予約できる)マスにだけ付いている onmousedown 属性から、
 # そのマスが対象としている時間範囲('12001500' のような8桁の文字列)を取り出す。
-# 予約済み(×)のマスにはこの属性自体が存在しないため、これが見つかること自体が
-# 「その時間範囲は予約受付中の空きマスとして表示されている」ことを意味する。
 CHANGE_STATUS_PATTERN = re.compile(
     r"changeCheckStatus\(\s*'[^']*'\s*,\s*'[^']*'\s*,\s*\d+\s*,\s*'(\d{8})'"
 )
 
 
 def parse_period_table(html: str):
-    """「期間の空き状況」画面のHTMLを解析し、日曜日かつ対象時間帯
-    (TARGET_HOURSに対応する時間範囲)が予約受付中の空きになっている
-    日付を抽出する。
+    """「期間の空き状況」画面のHTMLを解析し、TARGET_CONDITIONSの
+    いずれかに合致する(曜日が一致し、かつその時間帯が予約受付中の
+    空きになっている)日付を抽出する。
 
-    戻り値: (空きありと判定した日付のリスト, 日曜日として認識した全行の診断情報)
-    診断情報は [(日付表記, その行で見つかった空き時間範囲のリスト), ...] の形。
+    戻り値: (空きありと判定した [(日付表記, ラベル), ...] のリスト,
+             診断情報 [(日付表記, その行で見つかった空き時間範囲のリスト), ...])
     """
-    target_range = _target_range_str()
-
     row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
     first_cell_pattern = re.compile(r"<td[^>]*>(.*?)</td>", re.IGNORECASE | re.DOTALL)
     tag_strip = re.compile(r"<[^>]+>")
@@ -137,8 +125,12 @@ def parse_period_table(html: str):
     def clean(cell_html: str) -> str:
         return tag_strip.sub("", cell_html).strip()
 
-    found_dates = []
-    sunday_debug = []
+    def weekday_matches(text: str, weekday_mark: str) -> bool:
+        half_width = weekday_mark.replace("（", "(").replace("）", ")")
+        return weekday_mark in text or half_width in text
+
+    found = []
+    debug = []
 
     for row_html in row_pattern.findall(html):
         first_match = first_cell_pattern.search(row_html)
@@ -146,16 +138,19 @@ def parse_period_table(html: str):
             continue
         first_text = clean(first_match.group(1))
 
-        if "（日）" not in first_text and "(日)" not in first_text:
-            continue  # 日曜日以外の行はスキップ
+        matched_conditions = [c for c in TARGET_CONDITIONS if weekday_matches(first_text, c["weekday"])]
+        if not matched_conditions:
+            continue  # 対象曜日ではない行はスキップ
 
         available_ranges = CHANGE_STATUS_PATTERN.findall(row_html)
-        sunday_debug.append((first_text, available_ranges))
+        debug.append((first_text, available_ranges))
 
-        if target_range in available_ranges:
-            found_dates.append(first_text)
+        for condition in matched_conditions:
+            target = _range_str(condition["hours"])
+            if target in available_ranges:
+                found.append((first_text, condition["label"]))
 
-    return found_dates, sunday_debug
+    return found, debug
 
 
 def check_facility(page: Page, building: str, room_name: str, attempts: int = 3):
@@ -165,13 +160,12 @@ def check_facility(page: Page, building: str, room_name: str, attempts: int = 3)
         try:
             navigate_to_facility_period(page, building, room_name)
             html = safe_content(page)
-            dates, sunday_debug = parse_period_table(html)
-            print(f"[デバッグ] {building}/{room_name} 日曜日ごとの空き時間範囲: {sunday_debug}")
-            print(f"[デバッグ] {building}/{room_name} 判定結果(空き日): {dates}")
-            time_label = f"{TARGET_HOURS[0]}:00〜{int(TARGET_HOURS[-1]) + 1}:00"
+            found, debug = parse_period_table(html)
+            print(f"[デバッグ] {building}/{room_name} 対象曜日の空き時間範囲: {debug}")
+            print(f"[デバッグ] {building}/{room_name} 判定結果(空きあり): {found}")
             return [
-                f"{date_str} {building} {room_name} {time_label} 空きあり"
-                for date_str in dates
+                f"{date_str} {building} {room_name} {label} 空きあり"
+                for date_str, label in found
             ]
         except Exception as e:
             last_err = e
